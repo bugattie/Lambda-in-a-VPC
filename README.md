@@ -1,6 +1,6 @@
 ## Lambda in a VPC
 
-### Cloud Quest Security: Lambda Security
+### AWS Cloud Quest Security: Lambda Security
 
 #### Services used:
 
@@ -11,7 +11,7 @@
 - **VPC Endpoints:** To give access
 - **S3 Bucket:** Storage service
 
-This repository contains the CloudFormation template (deployment.yaml) for a secure AWS Lambda function implementation, inspired by the Cloud Quest Security challenges.
+This repository contains the CloudFormation template (deployment.yaml) for a secure AWS Lambda function implementation, inspired by the AWS Cloud Quest Security challenges.
 
 #### Key Security Features:
 

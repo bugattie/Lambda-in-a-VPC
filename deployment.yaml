@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Cloud Quest - Lambda Security.
+
+Metadata:
+  Author: "Mohsin Sheikhani"
+
+Parameters:
+  DBUsername:
+    Description: Username for Database Access
+    Type: String
+    NoEcho: "true"
+    MinLength: "1"
+    MaxLength: "16"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+
+  DBPassword:
+    Description: Password for MySQL database access
+    Type: String
+    NoEcho: "true"
+    MinLength: "8"
+    MaxLength: "41"
+    AllowedPattern: "[a-zA-Z0-9]*"
+    ConstraintDescription: must contain only alphanumeric characters.
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Purpose
+          Value: Store query results
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !GetAtt S3Bucket.Arn
+              - !Sub "${S3Bucket.Arn}/*"
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:DatabaseFunction"
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcId: !ImportValue shared-vpc-VpcId
+      RouteTableIds:
+        - !ImportValue shared-vpc-VPCPrivateSubnet2RouteTable
+
+  Database:
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F80
+          - id: F27
+    Properties:
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: "20"
+      Engine: mysql
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      PubliclyAccessible: false
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Lambda access to RDS
+      VpcId: !ImportValue shared-vpc-VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  RDSToLambdaIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  DatabaseConnParams:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Database Connection Parameters.
+      Name: DatabaseConnParams
+      SecretString: !Sub |
+        {
+          "RDS_HOSTNAME": "${Database.Endpoint.Address}",
+          "RDS_PORT": "${Database.Endpoint.Port}",
+          "RDS_USERNAME": "${DBUsername}",
+          "RDS_PASSWORD": "${DBPassword}"
+        }
+
+  SecretsManagerInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      VpcId: !ImportValue shared-vpc-VpcId
+      SubnetIds:
+        - !ImportValue shared-vpc-PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref SecretsManagerEndpointSecurityGroup
+
+  SecretsManagerEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Lambda access to Secrets Manager endpoint
+      VpcId: !ImportValue shared-vpc-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  FunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - PolicyName: LambdaAdditionalPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Resource: "*"
+                Action:
+                  - lambda:InvokeFunction
+                  - s3:Get*
+                  - s3:Put*
+                  - s3:List*
+                  - secretsmanager:List*
+                  - secretsmanager:Describe*
+                  - secretsmanager:Get*
+        - PolicyName: AllowDatabaseConnection
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:Connect
+                Resource: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${Database}"
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Lambda to access RDS and VPC endpoints
+      VpcId: !ImportValue shared-vpc-VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  LambdaToRDSIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref RDSSecurityGroup
+
+  DatabaseFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt FunctionExecutionRole.Arn
+      Handler: index.handler
+      Runtime: python3.9
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !ImportValue shared-vpc-PrivateSubnet2
+      Code:
+        ZipFile: |
+          print("Hello, World!")
